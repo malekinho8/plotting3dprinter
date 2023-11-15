@@ -6,7 +6,7 @@ import matplotlib
 from copy import copy
 import numpy as np
 
-def get_optimal_scaler(bed_size_x:int,bed_size_y:int,im_length_x:int, im_length_y:int, longest_edge:float):
+def get_optimal_scaler(bed_size_x:int,bed_size_y:int,im_length_x:int, im_length_y:int, longest_edge:float, scale_factor:float):
     X = bed_size_x
     Y = bed_size_y
     a = im_length_x
@@ -21,7 +21,7 @@ def get_optimal_scaler(bed_size_x:int,bed_size_y:int,im_length_x:int, im_length_
         scale_x = longest_edge/im_length_x
         scale_y = longest_edge/im_length_y
         scaler = min(scale_x,scale_y)
-    return scaler
+    return scaler * scale_factor
 
 def get_pass_list(z_surface:float, z_bottom:float, passes:int) -> list:
     return np.linspace(z_surface,z_bottom,passes).tolist()
@@ -61,7 +61,6 @@ def get_optimal_ordering(blockset):
         yield best[-1]
         remaining_blocks.pop(best_idx)
 
-
 def svg_to_gcode(svg_path,
                 gcode_path,
                 precision=10,
@@ -81,6 +80,8 @@ def svg_to_gcode(svg_path,
                 bed_size_y=200,
                 verbose=False,
                 passes=1, # number of passes (relevant for cutting material)
+                scale_factor=1,
+                 drill_on=False,
  ):
     assert cut_depth >= 0, 'The cut depth must be a positive value [mm] (or 0 in the case of drawing).'
     z_bottom = z_surface - cut_depth
@@ -92,7 +93,7 @@ def svg_to_gcode(svg_path,
         assert passes == 1, 'You only need to do 1 pass with the CNC tool since the bottom z-coordinate is equal to the surface z-coordinate.'
     else:
         assert passes > 1, 'You should set passes to a value greater than 1 since the bottom z-coordinate is lower than the surface coordinate.'
-    
+
     cmdcolor = {
         'L':'r',
         'l':'r',
@@ -140,6 +141,8 @@ def svg_to_gcode(svg_path,
     #        inp=repart(parts), PRECISION=precision)]
         coordinates = np.array(coordinates)
 
+        print(coordinates)
+
         bot = np.nanmin( coordinates[:,0])
         if min_x is None or bot<min_x:
             min_x = bot
@@ -159,7 +162,7 @@ def svg_to_gcode(svg_path,
 
     # perform scaling such that the longest edge < longest_edge mm
     if longest_edge is not None:
-        scaler = get_optimal_scaler(bed_size_x,bed_size_y,max_x - min_x, max_y - min_y, longest_edge)
+        scaler = get_optimal_scaler(bed_size_x,bed_size_y,max_x - min_x, max_y - min_y, longest_edge, scale_factor)
 
     fig, ax = plt.subplots()
 
@@ -168,9 +171,12 @@ def svg_to_gcode(svg_path,
     with open(gcode_path,'w') as o:
 
         # Move pen up:
-        o.write(f'G01 Z{z_up+z_safe} F{z_feedrate}\n') # Perform up
+        o.write(f'G01 Z{z_safe} F{z_feedrate}\n') # Perform up
         o.write('G28 X0 Y0\n') # perform home
         o.write(f'G01 Z{z_up} F{z_feedrate}\n') # Perform up
+
+        if drill_on:
+          o.write(f'M04 S700\n')
 
         # loop over passes
         pass_list = get_pass_list(z_surface, z_bottom, passes)
@@ -202,6 +208,9 @@ def svg_to_gcode(svg_path,
                             y1*=scaler
                             y2*=scaler
 
+                        # clip the coordinates to prevent negative values
+                        x1, y1, x2, y2 = np.clip(x1, 0, None), np.clip(y1, 0, None), np.clip(x2, 0, None), np.clip(y2, 0, None)
+
                         if x1>bed_size_x or y1>bed_size_y or x2>bed_size_x or y2>bed_size_y:
                             raise ValueError(f'Coordinates generated which fall outside of supplied printer bed size, adjust printer bed size or add "-longest_edge {min(bed_size_x,bed_size_y)}" to the command to scale the coordinates')
 
@@ -210,7 +219,7 @@ def svg_to_gcode(svg_path,
                             print('traveling ...', (x1,y1))
                             if prev is not None:
                                 # go up first
-                                o.write(f'G01 X{x_offset+prev[0]:.2f} Y{y_offset+prev[1]:.2f} Z{z_up} F{xy_feedrate}\n')
+                                o.write(f'G01 X{x_offset+prev[0]:.2f} Y{y_offset+prev[1]:.2f} Z{z_up} F{z_feedrate}\n')
                                 plt.plot([prev[0],x1],[prev[1],y2],c='grey')
                             o.write(f'G01 X{x_offset+x1:.2f} Y{y_offset+y1:.2f} Z{z_up} F{xy_feedrate}\n')
                             # Drop pen down at current position
@@ -222,22 +231,22 @@ def svg_to_gcode(svg_path,
                         o.write(f'G01 X{x_offset+x1:.2f} Y{y_offset+y1:.2f} Z{z_pass} F{xy_feedrate}\n')
                         #print(x2,y2)
                         o.write(f'G01 X{x_offset+x2:.2f} Y{y_offset+y2:.2f} Z{z_pass} F{xy_feedrate}\n')
+
                         plt.plot([x1,x2],[y1,y2],c='r')
                         prev = (x2,y2)
 
-                #o.write(f'#NEXT\n')
+            # block ended.. travel
+            o.write(f'G01 X{x_offset+x2:.2f} Y{y_offset+y2:.2f} Z{z_up} F{z_feedrate}\n')
 
-                # block ended.. travel
-                #o.write(f'G1 X{x_offset+x2:.2f} Y{y_offset+y:.2f} Z{z_up} F{xy_feedrate}\n')
-
-        o.write(f'G01 Z{z_up+z_safe} F{xy_feedrate}\n')
+        o.write(f'G01 Z{z_safe} F{xy_feedrate}\n')
+        o.write(f'M05\n')
         o.write(f'G28 X0 Y0') # go back to home position
 
         #plt.plot( coordinates[:,0],  coordinates[:,1])
 
         print('All done')
-        plt.xlim(-10,bed_size_x+10)
-        plt.ylim(-10,bed_size_y+10)
+        plt.xlim(-bed_size_x * 0.1, 1.1 * bed_size_x)
+        plt.ylim(-bed_size_y * 0.1, 1.1 * bed_size_y)
 
         plt.axvline(0,c='r',ls=':')
         plt.axvline(bed_size_x,c='r',ls=':')
@@ -247,5 +256,7 @@ def svg_to_gcode(svg_path,
         plt.axhline(bed_size_y,c='r',ls=':')
         plt.axhline(bed_size_y-y_offset,c='r',ls=':')
 
+        # set aspect ratio of the figure to be based on the bed size x and bed size y
+        plt.gca().set_aspect('equal', adjustable='box')
 
         plt.savefig(f'{gcode_path.replace(".gcode","")}.png', dpi=300)
